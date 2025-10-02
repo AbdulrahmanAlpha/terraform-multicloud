@@ -1,0 +1,81 @@
+# This workflow automates the process of validating, planning, and applying
+# Terraform changes across different environments using GitHub Actions.
+
+name: 'Terraform Multi-Cloud CI/CD'
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Grant GITHUB_TOKEN write permission to allow plan outputs to be commented on PRs.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+    strategy:
+      # Run the workflow for each environment folder (dev, staging, prod)
+      matrix:
+        environment: [dev, staging, prod]
+    
+    # Environment variables for cloud authentication (replace with your actual secrets)
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      GOOGLE_CREDENTIALS: ${{ secrets.GCP_SA_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0 # Match the version in versions.tf
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+        working-directory: ./envs/${{ matrix.environment }}
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+        working-directory: ./envs/${{ matrix.environment }}
+      
+      - name: Terraform Plan
+        id: plan
+        if: github.event_name == 'pull_request'
+        run: terraform plan -no-color
+        working-directory: ./envs/${{ matrix.environment }}
+        continue-on-error: true
+
+      - uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            // Add the Terraform plan output as a comment on the Pull Request
+            const output = `#### Terraform Plan for \`${{ matrix.environment }}\`\n\n\`\`\`\n${{ steps.plan.outputs.stdout }}\n\`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && success()
+        run: terraform apply -auto-approve
+        working-directory: ./envs/${{ matrix.environment }}
